@@ -64,7 +64,7 @@ static void kernel_thread (thread_func *, void *aux);
 static void idle (void *aux UNUSED);
 static struct thread *running_thread (void);
 static struct thread *next_thread_to_run (void);
-static bool
+bool
 thread_priority_more (const struct list_elem *a,
                       const struct list_elem *b,
                       void *aux UNUSED)
@@ -78,13 +78,13 @@ thread_priority_more (const struct list_elem *a,
 /* Yield if a higher-priority thread is ready.
    Do not switch threads from interrupt context or while
    the caller has interrupts disabled. */
-static void
+void
 thread_preempt_if_needed (void)
 {
   enum intr_level old_level;
   bool should_yield = false;
 
-  if (intr_context () || intr_get_level () == INTR_OFF)
+  if (!intr_context () && intr_get_level () == INTR_OFF)
     return;
 
   old_level = intr_disable ();
@@ -104,7 +104,12 @@ thread_preempt_if_needed (void)
   intr_set_level (old_level);
 
   if (should_yield)
-    thread_yield ();
+    {
+      if (intr_context ())
+        intr_yield_on_return ();
+      else
+        thread_yield ();
+    }
 }
 
 static void init_thread (struct thread *, const char *name, int priority);
@@ -176,6 +181,9 @@ thread_tick (void)
 #endif
   else
     kernel_ticks++;
+
+  /* Also service preemption deferred by an interrupt-disabled caller. */
+  thread_preempt_if_needed ();
 
   /* Enforce preemption. */
   if (++thread_ticks >= TIME_SLICE)
@@ -378,6 +386,43 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
+/* Solve the donation dependencies to a fixed point.  Starting from base
+   priorities removes obsolete donations, including after a lock release.
+   Priorities only increase during propagation, so even cycles terminate.
+   This supports arbitrary chain depth without recursion or stack growth. */
+void
+thread_refresh_priorities (void)
+{
+  struct list_elem *e;
+  bool changed;
+  ASSERT (intr_get_level () == INTR_OFF);
+  if (thread_mlfqs)
+    return;
+  for (e = list_begin (&all_list); e != list_end (&all_list);
+       e = list_next (e))
+    {
+      struct thread *t = list_entry (e, struct thread, allelem);
+      t->priority = t->base_priority;
+    }
+  do
+    {
+      changed = false;
+      for (e = list_begin (&all_list); e != list_end (&all_list);
+           e = list_next (e))
+        {
+          struct thread *t = list_entry (e, struct thread, allelem);
+          struct thread *holder = t->waiting_lock != NULL
+                                  ? t->waiting_lock->holder : NULL;
+          if (holder != NULL && holder->priority < t->priority)
+            {
+              holder->priority = t->priority;
+              changed = true;
+            }
+        }
+    }
+  while (changed);
+}
+
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority)
@@ -385,7 +430,10 @@ thread_set_priority (int new_priority)
   ASSERT (PRI_MIN <= new_priority &&
           new_priority <= PRI_MAX);
 
-  thread_current ()->priority = new_priority;
+  enum intr_level old_level = intr_disable ();
+  thread_current ()->base_priority = new_priority;
+  thread_refresh_priorities ();
+  intr_set_level (old_level);
 
   /* A different ready thread may now have higher priority. */
   thread_preempt_if_needed ();
@@ -515,6 +563,8 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
+  t->base_priority = priority;
+  t->waiting_lock = NULL;
   t->magic = THREAD_MAGIC;
 
   old_level = intr_disable ();
