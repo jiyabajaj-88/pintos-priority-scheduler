@@ -73,7 +73,40 @@ thread_priority_more (const struct list_elem *a,
   const struct thread *tb = list_entry (b, struct thread, elem);
 
   return ta->priority > tb->priority;
+
 }
+/* Yield if a higher-priority thread is ready.
+   Do not switch threads from interrupt context or while
+   the caller has interrupts disabled. */
+static void
+thread_preempt_if_needed (void)
+{
+  enum intr_level old_level;
+  bool should_yield = false;
+
+  if (intr_context () || intr_get_level () == INTR_OFF)
+    return;
+
+  old_level = intr_disable ();
+
+  if (!list_empty (&ready_list))
+    {
+      struct list_elem *highest =
+        list_min (&ready_list, thread_priority_more, NULL);
+
+      struct thread *next =
+        list_entry (highest, struct thread, elem);
+
+      should_yield =
+        next->priority > thread_current ()->priority;
+    }
+
+  intr_set_level (old_level);
+
+  if (should_yield)
+    thread_yield ();
+}
+
 static void init_thread (struct thread *, const char *name, int priority);
 static bool is_thread (struct thread *) UNUSED;
 static void *alloc_frame (struct thread *, size_t size);
@@ -211,6 +244,10 @@ thread_create (const char *name, int priority,
   /* Add to run queue. */
   thread_unblock (t);
 
+/* Let a newly created higher-priority thread run first. */
+thread_preempt_if_needed ();
+
+
   return tid;
 }
 
@@ -343,9 +380,15 @@ thread_foreach (thread_action_func *func, void *aux)
 
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
-thread_set_priority (int new_priority) 
+thread_set_priority (int new_priority)
 {
+  ASSERT (PRI_MIN <= new_priority &&
+          new_priority <= PRI_MAX);
+
   thread_current ()->priority = new_priority;
+
+  /* A different ready thread may now have higher priority. */
+  thread_preempt_if_needed ();
 }
 
 /* Returns the current thread's priority. */
