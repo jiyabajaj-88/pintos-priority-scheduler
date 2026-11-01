@@ -1,6 +1,7 @@
 # Priority Scheduling and Priority Donation in Pintos
 
 An individual Operating Systems project implementing priority-based thread scheduling and lock priority donation in Pintos.
+Individual project by Jiya Bajaj, built on the JHU Pintos distribution.
 
 **Author — Jiya Bajaj**  
 **Registration number — 24BKT0066**  
